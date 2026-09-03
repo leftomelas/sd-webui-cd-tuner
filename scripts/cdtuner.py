@@ -276,7 +276,9 @@ class Script(modules.scripts.Script):
         if debug: print("\n",allsets)
         if debug: print("\n",allsets_c)
 
-        self.isxl = hasattr(shared.sd_model,"conditioner")
+        # "conditioner" only exists on the A1111 backend, on Forge an SDXL model
+        # was detected as SD1.5 and used the wrong colour table
+        self.isxl = getattr(shared.sd_model, "is_sdxl", False) or hasattr(shared.sd_model,"conditioner")
         self.adjusts, self.bias_layout = get_adjusts(shared.sd_model)
         self.latent_channels = latent_channels(shared.sd_model)
         self.bright_dir = brightness_direction(shared.sd_model)
@@ -365,10 +367,18 @@ class Script(modules.scripts.Script):
         #print(self.activec,self.colors,self.ocells,self.icells,params.sampling_step)
         if self.activec:
             if self.shape is None:self.shape = params.x.shape
-            if params.x.shape[2] * params.x.shape[3] > self.shape[2]*self.shape[3]:
+            if params.x.shape[-2] * params.x.shape[-1] > self.shape[-2]*self.shape[-1]:
                 self.colored = 0
                 self.pas = 1
-            if self.colored == params.sampling_step and self.colored < self.fst:
+            # The A1111 backend passes [cond, uncond] in one tensor and the colour is
+            # subtracted from the cond half. Forge runs the denoiser once per half, so
+            # the whole tensor is the slice below: it has to be subtracted there too,
+            # or a preset comes out as its complementary colour, and both halves have
+            # to be reached, or only one of them is coloured and the effect is a
+            # fraction of what it is on A1111.
+            cond_last = params.x.shape[0] > self.batch
+            passes = 1 if cond_last else 2
+            if self.colored // passes == params.sampling_step and self.colored // passes < self.fst:
                 c = 0
                 scale = torch.mean(torch.abs(params.x[:,:,:,:]))
                 h,w = params.x.shape[-2], params.x.shape[-1]
@@ -392,10 +402,9 @@ class Script(modules.scripts.Script):
                             colorvec = [x / peak * wanted for x in colorvec]
                             # 16 channel latent: every channel carries colour, and the
                             # magnitude is normalised so a slider value pushes as hard
-                            # as it does on a 4 channel one. colorcalc returns the vector
-                            # denoised_callback subtracts, here it is added instead
+                            # as it does on a 4 channel one
                             targets = list(range(min(len(colorvec), params.x.shape[1])))
-                            offsets = [-x for x in colorvec]
+                            offsets = list(colorvec)
                             weight = 3.0 / len(colorvec)
                             # the 4 channel path leaves the luminance channel alone and
                             # only blends the colour ones. Every channel of a 16 channel
@@ -414,8 +423,9 @@ class Script(modules.scripts.Script):
                         for s2 in targets:
                             scale = torch.mean(torch.abs(params.x[:,s2]))
                             blend = (1 - cratio) if keep is None else keep
-                            params.x[:-self.batch,s2,...,s3,s4] = blend * params.x[:-self.batch,s2,...,s3,s4] - offsets[s2]*enhance * scale * cratio
-                            params.x[-self.batch:,s2,...,s3,s4] = blend * params.x[-self.batch:,s2,...,s3,s4] + offsets[s2]*enhance * scale * cratio
+                            shift = offsets[s2]*enhance * scale * cratio
+                            params.x[:-self.batch,s2,...,s3,s4] = blend * params.x[:-self.batch,s2,...,s3,s4] - shift
+                            params.x[-self.batch:,s2,...,s3,s4] = blend * params.x[-self.batch:,s2,...,s3,s4] + (shift if cond_last else -shift)
 
                         c += 1
                 self.colored += 1
