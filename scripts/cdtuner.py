@@ -371,7 +371,9 @@ class Script(modules.scripts.Script):
             if self.colored == params.sampling_step and self.colored < self.fst:
                 c = 0
                 scale = torch.mean(torch.abs(params.x[:,:,:,:]))
-                h,w = params.x.shape[2], params.x.shape[3]
+                h,w = params.x.shape[-2], params.x.shape[-1]
+                # the Wan latent of Anima and Krea2 has a frame dimension, so the
+                # region is always addressed through the last two dimensions
                 enhance = 6
                 hr_att = 0.25 if self.pas else 1
                 for i,ocell in enumerate(self.ocells):
@@ -383,13 +385,38 @@ class Script(modules.scripts.Script):
                             s3 = slice(int(h*icell[0]),int(h*icell[1]))
                             s4 = slice(int(w*ocell[0]),int(w*ocell[1]))
 
-                        for s2 in range(1,4):
-                            scale = torch.mean(torch.abs(params.x[:,s2,:,:])) 
-                            cratio =(sum(abs(x * 50) for x in colorcalc(self.colors[c],self.isxl)))/10 * (1/(1+(1 + params.sampling_step)**1.5/10)) * self.att * hr_att * self.satt
-                            if 0 > cratio : continue
-                            params.x[:-self.batch,s2,s3,s4] =(1 - cratio) * params.x[:-self.batch,s2,s3,s4] - colorcalc(self.colors[c],self.isxl)[s2-1]*enhance * scale * cratio
-                            params.x[-self.batch:,s2,s3,s4] =(1 - cratio) * params.x[-self.batch:,s2,s3,s4] + colorcalc(self.colors[c],self.isxl)[s2-1]*enhance * scale * cratio
-                            
+                        colorvec = colorcalc(self.colors[c],self.isxl,shared.sd_model)
+                        if len(colorvec) > 3:
+                            peak = max(abs(x) for x in colorvec) or 1.0
+                            wanted = MAP_PEAK * sum(abs(x) for x in self.colors[c])
+                            colorvec = [x / peak * wanted for x in colorvec]
+                            # 16 channel latent: every channel carries colour, and the
+                            # magnitude is normalised so a slider value pushes as hard
+                            # as it does on a 4 channel one. colorcalc returns the vector
+                            # denoised_callback subtracts, here it is added instead
+                            targets = list(range(min(len(colorvec), params.x.shape[1])))
+                            offsets = [-x for x in colorvec]
+                            weight = 3.0 / len(colorvec)
+                            # the 4 channel path leaves the luminance channel alone and
+                            # only blends the colour ones. Every channel of a 16 channel
+                            # latent carries structure, so blending them all replaces the
+                            # image with a flat colour: add the shift instead
+                            keep = 1.0
+                        else:
+                            targets = [1,2,3]
+                            offsets = [0.0] + list(colorvec)
+                            weight = 1.0
+                            keep = None
+                        cratio =(sum(abs(x * 50) for x in colorvec))/10 * weight * (1/(1+(1 + params.sampling_step)**1.5/10)) * self.att * hr_att * self.satt
+                        if 0 > cratio :
+                            c += 1
+                            continue
+                        for s2 in targets:
+                            scale = torch.mean(torch.abs(params.x[:,s2]))
+                            blend = (1 - cratio) if keep is None else keep
+                            params.x[:-self.batch,s2,...,s3,s4] = blend * params.x[:-self.batch,s2,...,s3,s4] - offsets[s2]*enhance * scale * cratio
+                            params.x[-self.batch:,s2,...,s3,s4] = blend * params.x[-self.batch:,s2,...,s3,s4] + offsets[s2]*enhance * scale * cratio
+
                         c += 1
                 self.colored += 1
 
@@ -710,6 +737,13 @@ IDENTIFIER_C = ["sp","md","cols","stc","str"]
 
 COLS = [[-1,1/3,2/3],[1,1,0],[0,-1,-1],[1,0,1]]
 COLSXL = [[0,0,1],[1,0,0],[-1,-1,0],[-1,1,0]]
+
+# Peak of the colour map offset per unit of slider, taken from what COLS produces.
+# The colour map amplifies by enhance * cratio and cratio is itself derived from the
+# length of the offset vector, so the effect grows with the square of that length.
+# A 16 channel latent needs much larger latent steps for the same RGB change, which
+# would overshoot by an order of magnitude, so the vector is rescaled to this peak.
+MAP_PEAK = 0.0113
 
 # ---- Forge Neo : DiT architectures -------------------------------------------
 # The UNet reads the latent with a conv, ends with a group norm and writes the
