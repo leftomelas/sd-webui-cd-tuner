@@ -548,7 +548,7 @@ def vaedealer(self):
 
 def vaeunloader(self):
     for name in self.storedweights_vae:
-        getset_nested_module_tensor(False,shared.sd_model, name, new_tensor = self.storedweights_vae[name].clone().to(devices.device) )
+        getset_nested_module_tensor(False,shared.sd_model, name, new_tensor = self.storedweights_vae[name])
 
 def vaedealer2(self):
     for name in self.vaekeys2:
@@ -559,7 +559,7 @@ def vaedealer2(self):
 
 def vaeunloader2(self):
     for name in self.storedweights_vae2:
-        getset_nested_module_tensor(False,shared.sd_model, name, new_tensor = self.storedweights_vae2[name].clone().to(devices.device) )
+        getset_nested_module_tensor(False,shared.sd_model, name, new_tensor = self.storedweights_vae2[name])
 
 def stopper(self,pas,step):
     judge = False
@@ -587,12 +587,31 @@ def getset_nested_module_tensor(clone,model, tensor_path, new_tensor = None):
     if clone : return target_module
 
     last_attr = sdmodules[-1]
-    setattr(target_module, last_attr, Parameter(new_tensor)) 
+    current = getattr(target_module, last_attr, None)
+
+    if isinstance(current, torch.Tensor) and current.shape == new_tensor.shape:
+        # Write into the existing tensor instead of replacing it. A fresh Parameter
+        # is not the object the Forge memory manager captured when it loaded the
+        # model, so it is skipped when the model is streamed to the CPU and stays
+        # behind on the GPU. The manager then believes it freed memory it did not,
+        # and the next generation fails inside the module move and is reported as an
+        # OOM even with the GPU nearly empty. Keeping the tensor also keeps its
+        # device, which matters while the model is offloaded.
+        # the backend loads the model under torch.inference_mode(), so its weights are
+        # inference tensors and can only be written to from inside that mode
+        with torch.inference_mode():
+            current.copy_(new_tensor.to(device=current.device, dtype=current.dtype))
+        return
+
+    setattr(target_module, last_attr, Parameter(new_tensor, requires_grad=False)) 
 
 def restoremodel(self):
     for name in getattr(self, "adjusts", ADJUSTS):
         if name is None or name not in self.storedweights: continue
-        getset_nested_module_tensor(False,shared.sd_model, name, new_tensor = self.storedweights[name].clone().to(devices.device))
+        # no .to(devices.device) here: the setter writes into the live tensor and
+        # keeps its device, forcing the weight onto the GPU used to strand it there
+        # whenever the model was offloaded
+        getset_nested_module_tensor(False,shared.sd_model, name, new_tensor = self.storedweights[name])
     if debug:print("Restored")
     return
 
