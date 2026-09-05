@@ -15,6 +15,10 @@ Update 2026.09.03(JST)
 - Forge上でColor Mapが指定と補色になっていた問題を修正しました
 - Forge上でSDXLがSD1.5用の色テーブルを使っていた問題を修正しました
 
+Update 2026.09.04.2300(JST)
+- support Z-Image, Anima, Krea2 in Forge NEO
+- Forge NEOでZ-Image, Anima, Krea2をサポート
+
 Update 2023.12.19.2300(JST)
 - add new parameter: saturation
 - 彩度が調節できるようになりました
